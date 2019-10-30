@@ -40,6 +40,13 @@ object UserSummary {
   var accounts_failed = 0L
 }
 
+// Geo user summary in the json will have this POJO
+object GeoSummary {
+  var districts = 0L
+  var blocks = 0L
+  var schools = 0L
+}
+
 
 object StateAdminReportJob extends optional.Application with IJob with ReportGenerator {
 
@@ -107,7 +114,13 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
 
   def prepareReport(spark: SparkSession, loadData: (SparkSession, Map[String, String]) => DataFrame): DataFrame = {
     val sunbirdKeyspace = AppConf.getConfig("course.metrics.cassandra.sunbirdKeyspace")
+    val locationDF = loadData(spark, Map("table" -> "location", "keyspace" -> sunbirdKeyspace))
     val distinctChannelDF = loadData(spark, Map("table" -> "shadow_user", "keyspace" -> sunbirdKeyspace)).select(col = "channel").distinct()
+    val activeRootOrganisationDF = loadData(spark, Map("table" -> "organisation", "keyspace" -> sunbirdKeyspace))
+        .select(col("id"), col("channel"))
+        .where(col("isrootorg") && col("status").=== (1))
+
+    println(activeRootOrganisationDF.count())
 
     val tempDir = AppConf.getConfig("course.metrics.temp.dir")
     val renamedDir = s"$tempDir/renamed"
@@ -149,11 +162,67 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
 
     fSFileUtils.renameReport(detailDir, renamedDir, ".csv", "user-detail")
     fSFileUtils.renameReport(summaryDir, renamedDir, ".json", "user-summary")
-    //uploadReport(renamedDir)
+
+    // Purge the directories after copying to the upload staging area
+    fSFileUtils.purgeDirectory(detailDir)
+    fSFileUtils.purgeDirectory(summaryDir)
+
+    // iterating through all active rootOrg and fetching all active suborg for a particular rootOrg
+    activeRootOrganisationDF.collect().foreach(rowUnit => {
+      val rootOrgId = rowUnit.get(0).toString
+      val channelName = rowUnit.get(1).toString
+      JobLogger.log(s"RootOrg id found = ${rootOrgId} and channel = ${channelName}")
+      println(s"RootOrg id found = ${rootOrgId} and channel = ${channelName}")
+
+      // fetching all suborg for a particular rootOrg
+      var schoolCountDf = loadData(spark, Map("table" -> "organisation", "keyspace" -> sunbirdKeyspace))
+        .where(col("status").equalTo(1) && not(col("isrootorg"))
+          && col("rootorgid").equalTo(rootOrgId))
+
+      // getting count of suborg , that will provide me school count.
+      val schoolCount = schoolCountDf.count()
+
+      val locationExplodedSchoolDF = schoolCountDf
+        .withColumn("exploded_location", explode(array("locationids")))
 
 
-    // TODO Geo-data
+      // collecting District Details and count from organisation and location table
+      val districtDF = locationExplodedSchoolDF
+        .join(locationDF,
+          col("exploded_location").cast("string").contains(locationDF.col("id").cast("string"))
+           && locationDF.col("type") === "district").select(locationDF.col("id")).distinct()
+      // collecting district count
+      val districtCount = districtDF.count()
 
+      // collecting block count and details.
+      val blockDetailsDF = locationExplodedSchoolDF
+        .join(locationDF,
+          col("exploded_location").cast("string").contains(locationDF.col("id").cast("string"))
+            && locationDF.col("type") === "block").select(locationDF.col("id")).distinct()
+
+      //collecting block count
+      val blockCount = blockDetailsDF.count()
+
+      var geoSummary = GeoSummary
+      geoSummary.blocks = blockCount
+      geoSummary.districts = districtCount
+      geoSummary.schools = schoolCount
+      val jsonStr = JSONUtils.serialize(geoSummary)
+      val rdd = spark.sparkContext.parallelize(Seq(jsonStr))
+      val summaryDF = spark.read.json(rdd)
+
+      //saveDetailsReport(oneOrgUsersDF, s"${detailDir}/channel=${channelName}")
+      saveSummaryReport(summaryDF, s"${summaryDir}/channel=${channelName}")
+    })
+
+    fSFileUtils.renameReport(detailDir, renamedDir, ".csv", "geo-detail")
+    fSFileUtils.renameReport(summaryDir, renamedDir, ".json", "geo-summary")
+
+    // Purge the directories after copying to the upload staging area
+    fSFileUtils.purgeDirectory(detailDir)
+    fSFileUtils.purgeDirectory(summaryDir)
+
+    JobLogger.log("Finished with prepareReport")
     return distinctChannelDF
   }
 
@@ -204,7 +273,7 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
     val provider = AppConf.getConfig("course.metrics.cloud.provider")
 
     // Container name can be generic - we dont want to create as many container as many reports
-    val container = AppConf.getConfig("course.metrics.cloud.container")
+    val container = AppConf.getConfig("admin.reports.cloud.container")
     val objectKey = AppConf.getConfig("admin.metrics.cloud.objectKey")
 
     val storageService = StorageServiceFactory

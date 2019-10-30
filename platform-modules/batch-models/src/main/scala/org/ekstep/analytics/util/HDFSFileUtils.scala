@@ -14,11 +14,16 @@ class HDFSFileUtils(classNameStr: String, jobLogger: JobLogger.type ) {
     extOnly ++ fileList.filter(_.isDirectory).flatMap(recursiveListFiles(_, ext))
   }
 
-  private def purgeDirectory(dir: File): Unit = {
+  def purgeDirectory(dir: File): Unit = {
     for (file <- dir.listFiles) {
       if (file.isDirectory) purgeDirectory(file)
       file.delete
     }
+  }
+
+  def purgeDirectory(dirName: String): Unit = {
+    val dir = new File(dirName)
+    purgeDirectory(dir)
   }
 
   def renameReport(tempDir: String, outDir: String, fileExt: String, fileNameSuffix: String = null) = {
