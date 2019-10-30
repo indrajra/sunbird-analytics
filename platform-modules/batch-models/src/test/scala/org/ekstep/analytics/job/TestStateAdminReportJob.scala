@@ -30,23 +30,16 @@ class TestStateAdminReportJob extends SparkSpec(null) with MockFactory {
   }
 
 
-  "TestUpdateCourseMetrics" should "generate reports" in {
+  "TestUpdateStateAdminReport" should "generate reports" in {
     (reporterMock.loadData _)
       .expects(spark, Map("table" -> "shadow_user", "keyspace" -> sunbirdKeyspace))
       .returning(shadowUserDF).repeat(3)
 
     val reportDF = StateAdminReportJob
-      .generateReports(spark, reporterMock.loadData)
+      .prepareReport(spark, reporterMock.loadData)
       .cache()
 
+    // There are only 2 state information in the test csv
     assert(reportDF.count == 2)
-//    assert(reportDF.groupBy(col("batchid")).count().count() == 10)
-//
-//    val reportData = reportDF
-//      .groupBy(col("batchid"))
-//      .count()
-//      .collect()
-//
-//    assert(reportData.filter(row => row.getString(0) == "1001").head.getLong(1) == 2)
   }
 }
