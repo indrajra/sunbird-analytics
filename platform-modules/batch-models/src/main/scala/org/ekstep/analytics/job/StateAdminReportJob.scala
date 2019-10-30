@@ -114,7 +114,13 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
 
   def prepareReport(spark: SparkSession, loadData: (SparkSession, Map[String, String]) => DataFrame): DataFrame = {
     val sunbirdKeyspace = AppConf.getConfig("course.metrics.cassandra.sunbirdKeyspace")
-    val locationDF = loadData(spark, Map("table" -> "location", "keyspace" -> sunbirdKeyspace))
+    val locationDF = loadData(spark, Map("table" -> "location", "keyspace" -> sunbirdKeyspace)).select(
+      col("id").as("locid"),
+      col("code").as("code"),
+      col("name").as("name"),
+      col("parentid").as("parentid"),
+      col("type").as("type")
+    )
     val distinctChannelDF = loadData(spark, Map("table" -> "shadow_user", "keyspace" -> sunbirdKeyspace)).select(col = "channel").distinct()
     val activeRootOrganisationDF = loadData(spark, Map("table" -> "organisation", "keyspace" -> sunbirdKeyspace))
         .select(col("id"), col("channel"))
@@ -156,7 +162,7 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
       val rdd = spark.sparkContext.parallelize(Seq(jsonStr))
       val summaryDF = spark.read.json(rdd)
 
-      saveDetailsReport(oneOrgUsersDF, s"${detailDir}/channel=${channelName}")
+      saveUserDetailsReport(oneOrgUsersDF, s"${detailDir}/channel=${channelName}")
       saveSummaryReport(summaryDF, s"${summaryDir}/channel=${channelName}")
     })
 
@@ -185,23 +191,28 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
       val locationExplodedSchoolDF = schoolCountDf
         .withColumn("exploded_location", explode(array("locationids")))
 
-
       // collecting District Details and count from organisation and location table
       val districtDF = locationExplodedSchoolDF
         .join(locationDF,
-          col("exploded_location").cast("string").contains(locationDF.col("id").cast("string"))
-           && locationDF.col("type") === "district").select(locationDF.col("id")).distinct()
+          col("exploded_location").cast("string")
+            .contains(col("locid"))
+           && locationDF.col("type") === "district")
+        .dropDuplicates(Seq("id"))
       // collecting district count
       val districtCount = districtDF.count()
 
       // collecting block count and details.
       val blockDetailsDF = locationExplodedSchoolDF
         .join(locationDF,
-          col("exploded_location").cast("string").contains(locationDF.col("id").cast("string"))
-            && locationDF.col("type") === "block").select(locationDF.col("id")).distinct()
+          col("exploded_location").cast("string").contains(col("locid"))
+            && locationDF.col("type") === "block")
+        .dropDuplicates(Seq("id"))
 
       //collecting block count
       val blockCount = blockDetailsDF.count()
+
+      val geoDetailsDF = districtDF.union(blockDetailsDF)
+      //geoDetailsDF.show(false)
 
       var geoSummary = GeoSummary
       geoSummary.blocks = blockCount
@@ -211,7 +222,7 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
       val rdd = spark.sparkContext.parallelize(Seq(jsonStr))
       val summaryDF = spark.read.json(rdd)
 
-      //saveDetailsReport(oneOrgUsersDF, s"${detailDir}/channel=${channelName}")
+      saveGeoDetailsReport(geoDetailsDF, s"${detailDir}/channel=${channelName}")
       saveSummaryReport(summaryDF, s"${summaryDir}/channel=${channelName}")
     })
 
@@ -241,8 +252,42 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
     * @param reportDF
     * @param url
     */
-  def saveDetailsReport(reportDF: DataFrame, url: String): Unit = {
+  def saveUserDetailsReport(reportDF: DataFrame, url: String): Unit = {
+    // List of fields available
+    //channel,userextid,addedby,claimedon,claimedstatus,createdon,email,name,orgextid,phone,processid,updatedon,userid,userids,userstatus
+
     reportDF.coalesce(1)
+      .select(
+        col("userextid").as("User external id"),
+        col("userstatus").as("User account status"),
+        col("userid").as("User id"),
+        col("userids").as("Matching User ids"),
+        col("claimedon").as("Claimed on"),
+        col("orgextid").as("School external id"),
+        col("claimedstatus").as("Claimed status"),
+        col("createdon").as("Created on"),
+        col("updatedon").as("Last updated on")
+      )
+      .write
+      .mode("overwrite")
+      .option("header", "true")
+      .csv(url)
+
+    JobLogger.log(s"StateAdminReportJob: uploadedSuccess nRecords = ${reportDF.count()}")
+  }
+
+  def saveGeoDetailsReport(reportDF: DataFrame, url: String): Unit = {
+    reportDF.coalesce(1)
+      .select(
+        col("id").as("School id"),
+        col("orgname").as("School name"),
+        col("channel").as("Channel"),
+        col("status").as("Status"),
+        col("locid").as("Location id"),
+        col("name").as("Location name"),
+        col("parentid").as("Parent location id"),
+        col("type").as("type")
+      )
       .write
       .mode("overwrite")
       .option("header", "true")

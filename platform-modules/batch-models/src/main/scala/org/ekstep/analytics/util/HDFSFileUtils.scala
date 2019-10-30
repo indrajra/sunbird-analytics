@@ -48,9 +48,9 @@ class HDFSFileUtils(classNameStr: String, jobLogger: JobLogger.type ) {
         val partitionFieldName = value.substring(1, value.length() - 1)
         var filePath = s"${out.getPath}/$partitionFieldName-$fileNameSuffix$fileExt"
 
-        //println(s"${partitionFieldName} Copying from ${file.toPath.toAbsolutePath()} to ${filePath}" )
         Files.copy(file.toPath, new File(s"${filePath}").toPath(), StandardCopyOption.REPLACE_EXISTING)
-        println("Copy success")
+        jobLogger.log(s"${partitionFieldName} Copied from ${file.toPath.toAbsolutePath()} to ${filePath}" )
+
       }
     })
   }
