@@ -1,8 +1,7 @@
 package org.ekstep.analytics.job
 
-import java.io.File
-import java.nio.file.{Files, StandardCopyOption}
 
+import org.apache.spark.sql.Encoders.kryo
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.functions.{col, _}
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -33,18 +32,13 @@ object UserStatus extends Enumeration {
 }
 
 // Shadow user summary in the json will have this POJO
-object UserSummary {
-  var accounts_validated = 0L
-  var accounts_rejected = 0L
-  var accounts_unclaimed = 0L
-  var accounts_failed = 0L
+case class UserSummary(accounts_validated: Long, accounts_rejected: Long,
+                       accounts_unclaimed: Long, accounts_failed: Long) {
 }
 
 // Geo user summary in the json will have this POJO
-object GeoSummary {
-  var districts = 0L
-  var blocks = 0L
-  var schools = 0L
+case class GeoSummary(districts: Long, blocks: Long, school: Long) {
+
 }
 
 
@@ -126,7 +120,7 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
         .select(col("id"), col("channel"))
         .where(col("isrootorg") && col("status").=== (1))
 
-    println(activeRootOrganisationDF.count())
+    JobLogger.log(s"Active root org count = $activeRootOrganisationDF.count()")
 
     val tempDir = AppConf.getConfig("course.metrics.temp.dir")
     val renamedDir = s"$tempDir/renamed"
@@ -136,27 +130,53 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
     val detailDir = s"${tempDir}/detail"
     val summaryDir = s"${tempDir}/summary"
 
+    case class ShadowUserData(channel: String)
+    case class RootOrgData(id: Long, channel: String)
+
+    implicit def ShadowDataEncoder = kryo[ShadowUserData]
+    implicit def RootOrgDataEncoder = kryo[RootOrgData]
+
     // For distinct channel names, do the following:
     // 1. Create a json, csv report - user-summary.json, user-detail.csv.
-    distinctChannelDF.collect().foreach(rowUnit => {
-      var summaryOutput = UserSummary
 
-      var channelName = rowUnit.mkString
-      JobLogger.log(channelName)
+    // FIXME: Remove these commented lines.
+    //    distinctChannelDF.collect().foreach(rowUnit => {
+    //      val channelName = rowUnit.mkString
+    distinctChannelDF.map(channelData => {
+      val channelName = channelData.get(0).toString
+      JobLogger.log(s"Start working on $channelName")
 
       val oneOrgUsersDF = loadData(spark, Map("table" -> "shadow_user", "keyspace" -> sunbirdKeyspace))
-          .where(col("channel").===(channelName))
-      val unclaimedCount = oneOrgUsersDF.where(s"claimedstatus == ${UserStatus.unclaimed.id}").count()
-      val claimedCount = oneOrgUsersDF.where(s"claimedstatus == ${UserStatus.claimed.id}").count()
-      val rejectedCount = oneOrgUsersDF.where(s"claimedstatus == ${UserStatus.rejected.id}").count()
-      val failedCount = oneOrgUsersDF.where(s"claimedStatus >= ${UserStatus.failed.id}").count()
+        .where(col("channel").===(channelName))
 
-      summaryOutput.accounts_validated = claimedCount
-      summaryOutput.accounts_failed = failedCount
-      summaryOutput.accounts_rejected = rejectedCount
-      summaryOutput.accounts_unclaimed = unclaimedCount
+      val countsDF = oneOrgUsersDF.select(
+          col("claimstatus"),
+          col(count("claimstatus")))
+        .groupBy("claimstatus")
 
-      JobLogger.log(s"${rowUnit.mkString} has ${oneOrgUsersDF.cache().count()} many users in shadow_user table")
+      countsDF.foreach(r => {
+        val status = r.get(0)
+        var itr = status.toString.toInt
+        println(s"$status is the status and has ${r.getAs[Long](1)}")
+        val counter = r.getAs[Long](1)
+
+        val presentVal: UserStatus.Value = UserStatus(itr)
+
+        presentVal match {
+          case UserStatus.unclaimed => unclaimedCount = counter
+          case UserStatus.claimed => claimedCount = counter
+          case UserStatus.rejected => rejectedCount = counter
+          // All these are considered failed.
+          case UserStatus.failed => failedCount += counter
+          case UserStatus.orgextidmismatch => failedCount += counter
+          case UserStatus.multimatch => failedCount += counter
+          case _ => println(s"Unknown status value = ${presentVal}")
+        }
+      })
+
+      var summaryOutput = UserSummary(claimedCount, rejectedCount, unclaimedCount, failedCount)
+
+      JobLogger.log(s"${channelName} has ${oneOrgUsersDF.cache().count()} many users in shadow_user table")
 
       val jsonStr = JSONUtils.serialize(summaryOutput)
       val rdd = spark.sparkContext.parallelize(Seq(jsonStr))
@@ -174,11 +194,15 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
     fSFileUtils.purgeDirectory(summaryDir)
 
     // iterating through all active rootOrg and fetching all active suborg for a particular rootOrg
-    activeRootOrganisationDF.collect().foreach(rowUnit => {
-      val rootOrgId = rowUnit.get(0).toString
-      val channelName = rowUnit.get(1).toString
+//    FIXME: Remove these commented lines.
+    // activeRootOrganisationDF.collect().foreach(rowUnit => {
+//      val rootOrgId = rowUnit.get(0).toString
+//      val channelName = rowUnit.get(1).toString
+
+    activeRootOrganisationDF.map(rootOrgData => {
+      val rootOrgId = rootOrgData.get(0).toString
+      val channelName = rootOrgData.get(1).toString
       JobLogger.log(s"RootOrg id found = ${rootOrgId} and channel = ${channelName}")
-      println(s"RootOrg id found = ${rootOrgId} and channel = ${channelName}")
 
       // fetching all suborg for a particular rootOrg
       var schoolCountDf = loadData(spark, Map("table" -> "organisation", "keyspace" -> sunbirdKeyspace))
@@ -197,7 +221,6 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
           col("exploded_location").cast("string")
             .contains(col("locid"))
            && locationDF.col("type") === "district")
-        .dropDuplicates(Seq("id"))
       // collecting district count
       val districtCount = districtDF.count()
 
@@ -206,7 +229,6 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
         .join(locationDF,
           col("exploded_location").cast("string").contains(col("locid"))
             && locationDF.col("type") === "block")
-        .dropDuplicates(Seq("id"))
 
       //collecting block count
       val blockCount = blockDetailsDF.count()
@@ -214,10 +236,7 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
       val geoDetailsDF = districtDF.union(blockDetailsDF)
       //geoDetailsDF.show(false)
 
-      var geoSummary = GeoSummary
-      geoSummary.blocks = blockCount
-      geoSummary.districts = districtCount
-      geoSummary.schools = schoolCount
+      var geoSummary = GeoSummary(districtCount, blockCount, schoolCount)
       val jsonStr = JSONUtils.serialize(geoSummary)
       val rdd = spark.sparkContext.parallelize(Seq(jsonStr))
       val summaryDF = spark.read.json(rdd)
@@ -234,7 +253,7 @@ object StateAdminReportJob extends optional.Application with IJob with ReportGen
     fSFileUtils.purgeDirectory(summaryDir)
 
     JobLogger.log("Finished with prepareReport")
-    return distinctChannelDF
+    distinctChannelDF
   }
 
 
