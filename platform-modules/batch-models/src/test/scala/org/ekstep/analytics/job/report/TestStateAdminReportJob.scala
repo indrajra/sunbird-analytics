@@ -5,10 +5,11 @@ import org.ekstep.analytics.framework.conf.AppConf
 import org.ekstep.analytics.framework.util.JobLogger
 import org.ekstep.analytics.job.report.StateAdminReportJob.className
 import org.ekstep.analytics.job.report.{BaseReportSpec, BaseReportsJob, ShadowUserData, StateAdminReportJob}
+import org.ekstep.analytics.model.SparkSpec
 import org.ekstep.analytics.util.{EmbeddedCassandra, HDFSFileUtils}
 import org.scalamock.scalatest.MockFactory
 
-class TestStateAdminReportJob extends BaseReportSpec with MockFactory {
+class TestStateAdminReportJob extends SparkSpec(null) with MockFactory {
 
   implicit var spark: SparkSession = _
   var map: Map[String, String] = _
